@@ -25,10 +25,18 @@ import { buildDossier } from './vendor/makefun-game.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
+// Validate inputs before copying: a missing game/ would otherwise fail with
+// a cryptic cpSync error, and a missing screenshots/ (the entry's cover)
+// would be silently skipped. Fail fast with a clear message instead.
+const gameDir = join(here, 'game');
+const shotsDir = join(here, 'screenshots');
+if (!existsSync(gameDir)) throw new Error(`AURELIA DELTA: game/ not found beside main.ts (looked in ${gameDir})`);
+if (!existsSync(shotsDir)) throw new Error(`AURELIA DELTA: screenshots/ not found beside main.ts (looked in ${shotsDir})`);
+
 mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
+cpSync(gameDir, join(out, 'game'), { recursive: true });
 mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+cpSync(shotsDir, join(out, 'screenshots'), { recursive: true });
 
 // The scorer's own caps (reference/gate.json): only text_max_bytes shapes the
 // bytes; the others refuse an entry the scorer would refuse (more than 4
