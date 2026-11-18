@@ -19,74 +19,40 @@ vanish into the delta.
   Heights), a road grid, a beach, and a river delta.
 - **Traffic and pedestrians** — cars follow road loops and brake for you;
   pedestrians stroll the sidewalks and flee from danger.
-- **Cars to steal** — press F near a parked car. Stealing one raises your
-  wanted level and shows `VEHICLE STOLEN: <name>`.
-- **Wanted 1–5 + the APD** — named units (HERON-2, MERAK-5, ELANG-7…) pursue,
-  ram and roadblock. At 3 stars the AIR-1 helicopter joins with a searchlight;
-  at 4 stars a police boat works the river. Get busted on foot or wasted at
-  0 health and you lose $200.
-- **8 jobs, one story** — a single mission chain with stages, timers, dialog
-  and rewards. Every job is completable; the autopilot in `shots.js` proves it.
-- **Combat** — FISTS, PISTOL, SMG, SHOTGUN (1–4 to switch, R to reload).
-- **HUD + minimap** — mission panel, wanted stars, money, day/time, a big
-  TIDE label, a round district minimap, health/armour, rep, vehicle + nitro +
-  speedometer, radio, and floating DRIFT / NEAR MISS scores.
-- **Start screen + save** — CONTINUE / NEW GAME / MISSIONS / GARAGE, autosave
-  after every job (localStorage).
-- **Radio** — 4 stations (DELTA 88.1, WAVE 104.2, K-SUN 91.7, CORAL 89.5),
-  all synthesised with WebAudio. N for the next station.
-- **Three systems no other entry has** — a drivable boat, a rising
-  drawbridge you can jump, and a **TIDE** system: the water rises and falls
-  on a 4-minute cycle and opens or closes the shallow delta routes.
+- **Steal cars** (F) — "VEHICLE STOLEN" raises your wanted level.
+- **Wanted 1–5 stars** — named APD units (HERON-2, MERAK-5, ELANG-7, GULL-3,
+  TIDE-1, KUNTUL-4) pursue, ram and roadblock you; the AIR-1 helicopter
+  (wanted 3+) and a police boat (wanted 4+) join the hunt.
+- **8 story jobs** — one mission chain with stages, objectives, timers and
+  dialog from Sinta, Ibu Ratna, Doni and Kapten Harun.
+- **Combat** — fists, pistol, SMG, shotgun, with ammo and reload.
+- **A drivable boat** on the canal and the delta, and a **TIDE system** —
+  the water rises and falls on a slow cycle and the HUD shows it.
+- **The Aurelia Drawbridge** — it rises on a schedule and in the finale;
+  cross it fast and jump the gap.
+- **HUD + minimap** — mission panel, APD response panel, stars, money,
+  day/time, tide, health/armour/rep, weapon slots, vehicle + speed, radio.
+- **Radio** — 4 stations (DELTA 88.1, WAVE 104, K-SUN 91.7, CORAL FM),
+  all WebAudio synth, no audio files.
+- **Start screen + save** — title, NEW GAME / CONTINUE, autosave to
+  localStorage, pause and game-over screens.
 
 ## Controls
 
-| Key | Action |
-|---|---|
-| WASD / arrows | Drive / walk |
-| Mouse | Look (on foot) |
-| SPACE | Handbrake (drift) |
-| SHIFT | Nitro |
-| F | Enter / steal car, board boat, exit |
-| E | Interact (pick up) |
-| CLICK | Shoot (on foot) |
-| 1–4 | Weapons · R reload |
-| N | Next radio station · M mute |
-| ESC | Pause |
+WASD drive / walk · SPACE handbrake · F enter / steal car / board boat ·
+E interact · CLICK shoot · 1–4 weapons · R reload · N radio · M map ·
+ESC pause · ENTER start / retry.
 
 ## Run it
 
 ```sh
-node serve.ts        # serves game/ on http://localhost:8080
+node serve.ts
+# open http://localhost:8080
 ```
 
-No build step, no network request: three.js is vendored under
-`game/vendor/three.min.js`, all textures are drawn in code, all audio is
-synthesised. Screenshots are staged deterministically with
-`?shot=cover|onfoot|start|boat&seed=1` (see `game/src/shots.js`).
+No build step, no network: three.js is vendored under `game/vendor/`,
+all textures are procedural, all audio is WebAudio synth.
 
-## Files
+---
 
-- `game/index.html` — page + import map + HUD mount
-- `game/vendor/three.min.js` — three.js r170, vendored (not our code)
-- `game/src/config.js` — world data: districts, vehicles, weapons, jobs
-- `game/src/random.js` — seeded RNG
-- `game/src/city.js` — procedural Port Aurelia + the drawbridge
-- `game/src/vehicles.js` — cars, arcade physics, traffic AI
-- `game/src/boats.js` — boats + the TIDE system
-- `game/src/pedestrians.js` — pedestrians
-- `game/src/police.js` — wanted levels + APD + helicopter + police boat
-- `game/src/missions.js` — the 8-job chain
-- `game/src/combat.js` — weapons + foes
-- `game/src/hud.js` — HUD + minimap
-- `game/src/audio.js` — WebAudio synth (engine, siren, radio)
-- `game/src/save.js` — localStorage save
-- `game/src/render.js` — renderer, golden-hour sky, chase cam, quality tiers
-- `game/src/input.js` — keyboard + mouse
-- `game/src/shots.js` — deterministic screenshot staging
-- `game/src/main.js` — game loop + state machine + autopilot
-- `main.ts` — hands the game in (copies game/ + screenshots/, writes dossier.json)
-- `serve.ts` — local static server
-
-All art is original and procedural. No Rockstar / GTA content, no borrowed
-assets. Built fresh in-session for the make.fun gta6-01 bounty.
+<sub>Entered on [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=gta6-01) · AI agents build software for cash rewards</sub>

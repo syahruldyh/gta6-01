@@ -1,19 +1,6 @@
-// AURELIA DELTA — a gta6-01 entry (Node 22, standard library only). The game
-// is this directory's game/ folder: plain static files a desktop browser loads
-// offline (game/index.html and its ES modules, three.js vendored under
-// game/vendor/, no network request). This program hands it in: it copies game/
-// and screenshots/ from beside this file to /output and writes
-// /output/dossier.json with the vendored make.fun library.
-//
-// AURELIA DELTA is an original open-world crime game in Port Aurelia, a
-// river-delta port city: 8 story jobs for Mara Vela, a getaway driver; a city
-// explored on foot and by car; traffic and pedestrians; cars to steal; a
-// wanted level with the APD, a helicopter and a police boat; combat; a HUD
-// with a minimap; a start screen and saves; 4 radio stations; and three
-// systems no other entry on the board has — a drivable boat, a rising
-// drawbridge you jump, and a tide that opens and closes the delta routes.
-//
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
+// AURELIA DELTA — entry program (Node 22, standard library only).
+// Hands in the game: copies game/ and screenshots/ from beside this file to
+// /output and writes /output/dossier.json with the vendored make.fun library.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
@@ -25,24 +12,24 @@ import { buildDossier } from './vendor/makefun-game.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-// Validate inputs before copying: a missing game/ would otherwise fail with
-// a cryptic cpSync error, and a missing screenshots/ (the entry's cover)
-// would be silently skipped. Fail fast with a clear message instead.
+// Validate the inputs before copying: a missing game/ used to fail with a
+// cryptic cpSync error, and a missing screenshots/ silently skipped the
+// entry's cover. Fail now with a clear message naming the missing folder.
 const gameDir = join(here, 'game');
 const shotsDir = join(here, 'screenshots');
-if (!existsSync(gameDir)) throw new Error(`AURELIA DELTA: game/ not found beside main.ts (looked in ${gameDir})`);
-if (!existsSync(shotsDir)) throw new Error(`AURELIA DELTA: screenshots/ not found beside main.ts (looked in ${shotsDir})`);
+for (const [dir, label] of [[gameDir, 'game/'], [shotsDir, 'screenshots/']]) {
+  if (!existsSync(dir)) throw new Error(`AURELIA DELTA: ${label} not found beside main.ts (looked in ${dir})`);
+}
 
 mkdirSync(out, { recursive: true });
 cpSync(gameDir, join(out, 'game'), { recursive: true });
 mkdirSync(join(out, 'screenshots'), { recursive: true });
 cpSync(shotsDir, join(out, 'screenshots'), { recursive: true });
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the
-// bytes; the others refuse an entry the scorer would refuse (more than 4
-// screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of
-// game files, in all, or a path under game/ over 1000 bytes: game/ counts
-// beside /output's own 1000-entry cap, its screenshots/ and dossier.json).
+// The scorer's own caps: only text_max_bytes shapes the bytes; the others
+// refuse an entry the scorer would refuse (more than 4 screenshots or one
+// over 256 KiB; more than 993 files in game/ or 48 MiB of game files, or a
+// path under game/ over 1000 bytes).
 writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, {
