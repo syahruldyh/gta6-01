@@ -1,178 +1,222 @@
-// HUD: DOM panels + a canvas minimap. Simplified on purpose (Sol's review):
-// the big readable elements are the wanted stars, the speed, the district
-// minimap and the TIDE label. The APD panel, dialog, weapon slots and radio
-// are small lines. The HUD frames the action, it never covers the subject.
-import { CFG, districtAt } from './config.js';
+// HUD: the dense DOM overlay — mission panel, APD response, stars, money, tide,
+// minimap, health/armour/rep, weapon slots, vehicle + speed, radio, dialog.
+import { DISTRICTS, MAP, WEAPONS, RADIO } from './config.js';
+import { districtAt, tideLabel } from './city.js';
+import { currentJob, currentStage } from './missions.js';
 
-function el(tag, cls, parent, html = '') {
+const el = (tag, cls, parent, html = '') => {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
-  e.innerHTML = html;
+  if (html) e.innerHTML = html;
   if (parent) parent.appendChild(e);
   return e;
+};
+
+export function buildHUD(G) {
+  const root = document.getElementById('hud');
+  const h = { root };
+  h.mission = el('div', 'panel mission', root);
+  h.missionTitle = el('div', 'mtitle', h.mission);
+  h.missionObj = el('div', 'mobj', h.mission);
+  h.missionNext = el('div', 'mnext', h.mission);
+  h.apd = el('div', 'panel apd', root);
+  h.apdTitle = el('div', 'atitle', h.apd);
+  h.apdUnits = el('div', 'aunits', h.apd);
+  h.topRight = el('div', 'panel topright', root);
+  h.clock = el('div', 'clock', h.topRight);
+  h.money = el('div', 'money', h.topRight);
+  h.stars = el('div', 'stars', h.topRight);
+  h.tide = el('div', 'tide', h.topRight);
+  h.insight = el('div', 'insight', h.topRight);
+  h.weapons = el('div', 'panel weapons', root);
+  h.minimapBox = el('div', 'panel minimap-box', root);
+  h.minimap = el('canvas', '', h.minimapBox);
+  h.minimap.width = 168; h.minimap.height = 168;
+  h.district = el('div', 'district', h.minimapBox);
+  h.vitals = el('div', 'vitals', h.minimapBox);
+  h.dialog = el('div', 'panel dialog', root);
+  h.dialogName = el('div', 'dname', h.dialog);
+  h.dialogText = el('div', 'dtext', h.dialog);
+  h.vehicle = el('div', 'panel vehicle', root);
+  h.radio = el('div', 'radio', h.vehicle);
+  h.carName = el('div', 'carname', h.vehicle);
+  h.cond = el('div', 'cond', h.vehicle);
+  h.speed = el('div', 'speed', h.vehicle);
+  h.floats = el('div', 'floats', root);
+  h.controls = el('div', 'controls', root, 'WASD drive / walk &nbsp;·&nbsp; SPACE handbrake &nbsp;·&nbsp; F enter / steal &nbsp;·&nbsp; E interact &nbsp;·&nbsp; CLICK shoot &nbsp;·&nbsp; 1–4 weapons &nbsp;·&nbsp; R reload &nbsp;·&nbsp; N radio &nbsp;·&nbsp; M map &nbsp;·&nbsp; ESC pause');
+  h.locationEl = el('div', 'location-card', root);
+  h.title = el('div', 'title-screen', root);
+  h.title.innerHTML = `<div class="gametitle">AURELIA DELTA</div>
+    <div class="gamesub">PORT AURELIA · A RIVER-DELTA PORT CITY</div>
+    <div class="gamefeat">8 JOBS · 5-STAR POLICE · BOATS &amp; BRIDGES</div>
+    <div class="menu"><button id="btn-continue">CONTINUE</button><button id="btn-new">NEW GAME</button></div>
+    <div class="menulist">MISSIONS &nbsp;·&nbsp; GARAGE &nbsp;·&nbsp; SETTINGS</div>
+    <div class="menunote">Press ENTER to start — Mara Vela, 27, getaway driver. The APD framed her. Eight jobs buy her freedom.</div>`;
+  h.pause = el('div', 'pause-screen', root, '<div class="gametitle small">PAUSED</div><div class="menunote">ESC to resume · R restart mission</div>');
+  h.over = el('div', 'over-screen', root);
+  h.sayTimer = 0;
+  h.floatTimer = 0;
+  h._t = 0;
+  // bound helpers so missions/combat/main can call G.hud.say(...) etc.
+  h.say = (name, role, text) => say(G, name, role, text);
+  h.floatText = (text) => floatText(G, text);
+  h.location = (name) => locationCard(G, name);
+  G.hud = h;
+  // title buttons
+  document.getElementById('btn-new').addEventListener('click', () => G.startNewGame());
+  document.getElementById('btn-continue').addEventListener('click', () => G.startNewGame());
+  return h;
 }
 
-export class HUD {
-  constructor(root) {
-    this.root = root;
-    const style = document.createElement('style');
-    style.textContent = `
-      #hud{position:fixed;inset:0;pointer-events:none;font-family:'Segoe UI',Arial,sans-serif;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.8);z-index:5}
-      .panel{background:rgba(10,14,20,.62);border:1px solid rgba(255,255,255,.22);border-radius:8px;padding:8px 11px;backdrop-filter:blur(2px)}
-      #mission{position:absolute;top:12px;left:12px;max-width:340px}
-      #mission .t{font-weight:800;font-size:15px;letter-spacing:.4px;color:#ffd970}
-      #mission .o{font-size:13px;margin-top:2px}
-      #mission .s{font-size:11px;color:#cfe0f0;margin-top:3px}
-      #status{position:absolute;top:12px;right:12px;text-align:right}
-      #status .day{font-size:12px;color:#cfe0f0}
-      #status .money{font-size:20px;font-weight:800;color:#8aff9a}
-      #status .stars{font-size:26px;color:#ff2a2a;letter-spacing:2px;line-height:1.1}
-      #status .tide{font-size:15px;font-weight:800;color:#7fd4ff;margin-top:2px}
-      #apd{position:absolute;top:132px;left:12px;font-size:11px;color:#ffb0b0;max-width:230px}
-      #lower{position:absolute;left:12px;bottom:12px}
-      #minimap{width:150px;height:150px;border-radius:50%;border:2px solid rgba(255,255,255,.5);background:rgba(10,16,22,.7);display:block}
-      #district{font-size:12px;font-weight:700;color:#ffd970;margin-top:4px;text-align:center}
-      .bar{height:7px;border-radius:4px;background:rgba(255,255,255,.25);margin-top:3px;overflow:hidden;width:150px}
-      .bar>i{display:block;height:100%}
-      #vitals{position:absolute;right:12px;bottom:12px;text-align:right}
-      #vitals .car{font-size:14px;font-weight:800}
-      #vitals .speed{font-size:42px;font-weight:900;line-height:1;color:#fff}
-      #vitals .speed small{font-size:13px;color:#cfe0f0}
-      #vitals .sub{font-size:11px;color:#cfe0f0}
-      #weapons{font-size:11px;color:#d8e4f0;margin-top:2px}
-      #radio{font-size:11px;color:#ffd970}
-      #dialog{position:absolute;left:50%;bottom:96px;transform:translateX(-50%);max-width:560px;text-align:center;font-size:14px}
-      #dialog b{color:#ffd970}
-      #toast{position:absolute;left:50%;top:18%;transform:translateX(-50%);font-size:22px;font-weight:900;color:#ffd970;text-align:center}
-      #floaters{position:absolute;left:50%;top:38%;transform:translateX(-50%);font-size:18px;font-weight:800;color:#8aff9a;text-align:center}
-      #cross{position:absolute;left:50%;top:50%;width:10px;height:10px;margin:-5px 0 0 -5px;border:2px solid rgba(255,255,255,.85);border-radius:50%;display:none}
-      #controls{position:absolute;left:50%;bottom:2px;transform:translateX(-50%);font-size:10px;color:rgba(255,255,255,.55);white-space:nowrap}
-      #screen{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:radial-gradient(ellipse at 50% 30%,rgba(20,30,50,.25),rgba(5,8,14,.82));z-index:10;pointer-events:auto;text-align:center;color:#fff}
-      #screen h1{font-size:56px;margin:0;letter-spacing:6px;color:#ffd970;text-shadow:0 3px 18px rgba(0,0,0,.9)}
-      #screen h2{font-size:17px;margin:6px 0 18px;font-weight:400;color:#e8eef5}
-      #screen .tag{font-size:13px;color:#7fd4ff;letter-spacing:2px}
-      .btn{display:block;width:280px;margin:7px auto;padding:11px 0;background:rgba(255,217,112,.92);color:#16202e;border:0;border-radius:8px;font-size:16px;font-weight:800;cursor:pointer}
-      .btn.alt{background:rgba(255,255,255,.16);color:#fff}
-      .btn:hover{filter:brightness(1.12)}
-      #screen .fine{font-size:11px;color:rgba(255,255,255,.6);margin-top:14px}
-    `;
-    document.head.appendChild(style);
-    const hud = el('div', '', root); hud.id = 'hud';
-    this.hudEl = hud;
-    this.mission = el('div', 'panel', hud); this.mission.id = 'mission';
-    this.missionT = el('div', 't', this.mission);
-    this.missionO = el('div', 'o', this.mission);
-    this.missionS = el('div', 's', this.mission);
-    const status = el('div', 'panel', hud); status.id = 'status';
-    this.day = el('div', 'day', status);
-    this.money = el('div', 'money', status);
-    this.stars = el('div', 'stars', status);
-    this.tide = el('div', 'tide', status);
-    this.apd = el('div', 'panel', hud); this.apd.id = 'apd';
-    const lower = el('div', '', hud); lower.id = 'lower';
-    this.map = el('canvas', '', lower); this.map.id = 'minimap';
-    this.map.width = 150; this.map.height = 150;
-    this.district = el('div', '', lower); this.district.id = 'district';
-    this.hpBar = el('div', 'bar', lower); this.hpFill = el('i', '', this.hpBar);
-    this.hpFill.style.background = '#4ade80';
-    this.arBar = el('div', 'bar', lower); this.arFill = el('i', '', this.arBar);
-    this.arFill.style.background = '#7fb4ff';
-    this.rep = el('div', 'sub', lower);
-    const vitals = el('div', 'panel', hud); vitals.id = 'vitals';
-    this.carName = el('div', 'car', vitals);
-    this.speed = el('div', 'speed', vitals);
-    this.nitroBar = el('div', 'bar', vitals); this.nitroFill = el('i', '', this.nitroBar);
-    this.nitroFill.style.background = '#ff9a3c';
-    this.weapons = el('div', '', vitals); this.weapons.id = 'weapons';
-    this.radio = el('div', '', vitals); this.radio.id = 'radio';
-    this.dialog = el('div', 'panel', hud); this.dialog.id = 'dialog';
-    this.toast = el('div', '', hud); this.toast.id = 'toast';
-    this.floaters = el('div', '', hud); this.floaters.id = 'floaters';
-    this.cross = el('div', '', hud); this.cross.id = 'cross';
-    this.controls = el('div', '', hud); this.controls.id = 'controls';
-    this.controls.textContent = 'WASD drive / walk · SPACE handbrake · F enter / steal car · E interact · CLICK shoot · 1-4 weapons · R reload · SHIFT nitro · N radio · M map · ESC pause';
-    this.screen = el('div', '', root); this.screen.id = 'screen';
-    this.mapCtx = this.map.getContext('2d');
-    this.floatT = 0;
+function fmtTime(G) {
+  const mins = Math.floor(G.time.t / 60) % 1440;
+  const hh = String(Math.floor(mins / 60) + 17).padStart(2, '0');
+  const mm = String(mins % 60).padStart(2, '0');
+  return hh + ':' + mm;
+}
+
+function fmtTimer(s) {
+  const m = Math.floor(s / 60), ss = Math.floor(s % 60);
+  return m + ':' + String(ss).padStart(2, '0');
+}
+
+export function say(G, name, role, text) {
+  const h = G.hud;
+  h.dialogName.textContent = name + ' — ' + role;
+  h.dialogText.textContent = '\u201C' + text + '\u201D';
+  h.dialog.style.opacity = '1';
+  h.sayTimer = 6;
+}
+
+export function floatText(G, text) {
+  const h = G.hud;
+  const d = document.createElement('div');
+  d.className = 'float-line';
+  d.textContent = text;
+  h.floats.appendChild(d);
+  setTimeout(() => d.remove(), 2600);
+}
+
+export function locationCard(G, name) {
+  const h = G.hud;
+  h.locationEl.textContent = name;
+  h.locationEl.style.opacity = '1';
+  setTimeout(() => { h.locationEl.style.opacity = '0'; }, 2600);
+}
+
+function drawMinimap(G) {
+  const h = G.hud;
+  const c = h.minimap.getContext('2d');
+  const S = 168, half = MAP.half;
+  const px = (x) => ((x + half) / (half * 2)) * S;
+  const pz = (z) => ((z + half) / (half * 2)) * S;
+  c.clearRect(0, 0, S, S);
+  c.fillStyle = '#20242a'; c.fillRect(0, 0, S, S);
+  // water
+  c.fillStyle = '#1e6a8a';
+  c.fillRect(0, pz(MAP.canalZ0), S, S - pz(MAP.canalZ0));
+  // roads
+  c.strokeStyle = '#5a5a62'; c.lineWidth = 2;
+  for (const x of MAP.roadsX) { c.beginPath(); c.moveTo(px(x), pz(-280)); c.lineTo(px(x), pz(150)); c.stroke(); }
+  for (const z of MAP.roadsZ) { c.beginPath(); c.moveTo(px(-280), pz(z)); c.lineTo(px(280), pz(z)); c.stroke(); }
+  // bridge
+  c.strokeStyle = '#ffd21f'; c.lineWidth = 3;
+  c.beginPath(); c.moveTo(px(0), pz(140)); c.lineTo(px(0), pz(240)); c.stroke();
+  // objective
+  const st = currentStage(G);
+  if (st && G.missions.state === 'active') {
+    c.fillStyle = '#ffd21f';
+    c.beginPath(); c.arc(px(st.x), pz(st.z), 5, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = '#ffd21f'; c.beginPath(); c.arc(px(st.x), pz(st.z), 9, 0, Math.PI * 2); c.stroke();
   }
-  showScreen(html) { this.screen.style.display = 'flex'; this.screen.innerHTML = html; }
-  hideScreen() { this.screen.style.display = 'none'; }
-  setHudVisible(v) { this.hudEl.style.display = v ? 'block' : 'none'; }
-  setToast(text, secs = 3) { this.toast.textContent = text; this.toastT = secs; }
-  addFloater(text) {
-    this.floaters.textContent = text;
-    this.floatT = 2.2;
+  // police
+  c.fillStyle = '#4a86ff';
+  for (const car of G.police.cars) {
+    c.beginPath(); c.arc(px(car.pos.x), pz(car.pos.z), 3, 0, Math.PI * 2); c.fill();
   }
-  update(dt, s) {
-    // s: {mission, wanted, money, day, time, tide, apd, health, armour, rep,
-    //     repMax, district, car, speed, nitro, weapons, weaponIdx, radio, dialog,
-    //     onFoot, map:{player, police, target, heading}}
-    this.missionT.textContent = s.mission.label;
-    this.missionO.textContent = s.mission.objective;
-    this.missionS.textContent = `${s.mission.stage} · ${s.mission.next} · ${s.mission.timer}`;
-    this.day.textContent = `DAY ${s.day} · ${s.time}`;
-    this.money.textContent = '$' + s.money.toLocaleString('en-US');
-    this.stars.textContent = '★'.repeat(s.wanted) + '☆'.repeat(Math.max(0, 5 - s.wanted));
-    this.stars.style.opacity = s.wanted > 0 ? '1' : '0.35';
-    this.tide.textContent = 'TIDE: ' + s.tide;
-    this.apd.innerHTML = s.apd.units > 0
-      ? `APD — ${s.apd.units} UNITS · CODE ${s.wanted}<br>${s.apd.nearest}`
-      : 'APD — CLEAR';
-    this.district.textContent = s.district;
-    this.hpFill.style.width = s.health + '%';
-    this.arFill.style.width = s.armour + '%';
-    this.rep.textContent = `REP ${s.repLevel} · ${s.rep}/${s.repMax}`;
-    this.carName.textContent = s.car;
-    this.speed.innerHTML = `${Math.round(s.speed * 3.6)} <small>KM/H</small>`;
-    this.nitroFill.style.width = s.nitro + '%';
-    this.weapons.textContent = s.weapons;
-    this.radio.textContent = s.radio;
-    this.dialog.style.display = s.dialog ? 'block' : 'none';
-    if (s.dialog) this.dialog.innerHTML = s.dialog;
-    this.cross.style.display = s.onFoot ? 'block' : 'none';
-    if (this.toastT > 0) { this.toastT -= dt; if (this.toastT <= 0) this.toast.textContent = ''; }
-    if (this.floatT > 0) { this.floatT -= dt; if (this.floatT <= 0) this.floaters.textContent = ''; }
-    this.drawMap(s.map);
+  if (G.police.heli) {
+    c.fillStyle = '#ff5a5a';
+    c.beginPath(); c.arc(px(G.police.heli.position.x), pz(G.police.heli.position.z), 4, 0, Math.PI * 2); c.fill();
   }
-  drawMap(m) {
-    const g = this.mapCtx, S = 150, C = S / 2;
-    g.clearRect(0, 0, S, S);
-    g.save();
-    g.beginPath(); g.arc(C, C, C - 1, 0, Math.PI * 2); g.clip();
-    g.fillStyle = '#101c26'; g.fillRect(0, 0, S, S);
-    const toMap = (x, z) => [C + (x / 640) * S, C + (z / 640) * S];
-    // water
-    g.fillStyle = '#1d5a74';
-    let [x0, y0] = toMap(200, -320); g.fillRect(x0, 0, S - x0, S);
-    [x0, y0] = toMap(-320, 240); g.fillRect(0, y0, S, S - y0);
-    // districts (faint)
-    for (const d of CFG.districts) {
-      const [ax, ay] = toMap(d.x0, d.z0), [bx, by] = toMap(d.x1, d.z1);
-      g.fillStyle = d.color + '44'; g.fillRect(ax, ay, bx - ax, by - ay);
-    }
-    // roads
-    g.strokeStyle = 'rgba(220,225,230,0.75)'; g.lineWidth = 1.4;
-    for (const x of CFG.streetsNS) { const [ax] = toMap(x, 0); g.beginPath(); g.moveTo(ax, 0); g.lineTo(ax, S); g.stroke(); }
-    for (const z of CFG.streetsEW) { const [, ay] = toMap(0, z); g.beginPath(); g.moveTo(0, ay); g.lineTo(S, ay); g.stroke(); }
-    // bridge
-    g.strokeStyle = '#ffd970'; g.lineWidth = 2;
-    let [ax, ay] = toMap(180, 0), [bx, by] = toMap(300, 0);
-    g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke();
-    // mission target
-    if (m.target) {
-      const [tx, ty] = toMap(m.target[0], m.target[1]);
-      g.fillStyle = '#ffd970';
-      g.save(); g.translate(tx, ty); g.rotate(Math.PI / 4); g.fillRect(-4, -4, 8, 8); g.restore();
-    }
-    // police dots
-    g.fillStyle = '#ff4040';
-    for (const p of m.police) { const [px, py] = toMap(p[0], p[1]); g.beginPath(); g.arc(px, py, 2.6, 0, Math.PI * 2); g.fill(); }
-    // player arrow
-    const [px, py] = toMap(m.player[0], m.player[1]);
-    g.save(); g.translate(px, py); g.rotate(m.heading);
-    g.fillStyle = '#fff';
-    g.beginPath(); g.moveTo(0, -6); g.lineTo(4.5, 5); g.lineTo(0, 2.5); g.lineTo(-4.5, 5); g.closePath(); g.fill();
-    g.restore();
-    g.restore();
+  // player arrow
+  const p = G.player;
+  c.save();
+  c.translate(px(p.pos.x), pz(p.pos.z));
+  c.rotate(Math.atan2(Math.sin(p.heading), Math.cos(p.heading)) + Math.PI);
+  c.fillStyle = '#ffffff';
+  c.beginPath(); c.moveTo(0, -7); c.lineTo(5, 6); c.lineTo(-5, 6); c.closePath(); c.fill();
+  c.restore();
+}
+
+export function updateHUD(G, dt) {
+  const h = G.hud;
+  h.root.classList.toggle('in-title', G.mode === 'title');
+  h._t -= dt;
+  drawMinimap(G);
+  if (h.sayTimer > 0) { h.sayTimer -= dt; if (h.sayTimer <= 0) h.dialog.style.opacity = '0'; }
+  if (h._t > 0) return;
+  h._t = 0.15;
+  const p = G.player;
+  const job = currentJob(G);
+  const st = currentStage(G);
+  if (job && G.missions.state === 'active') {
+    h.missionTitle.textContent = `MISSION ${job.id}/8 · ${job.title}`;
+    h.missionObj.textContent = (st ? st.text : '') + `   STAGE ${G.missions.stage + 1}/${job.stages.length}`;
+    const next = job.stages[G.missions.stage + 1];
+    h.missionNext.textContent = next ? 'NEXT: ' + next.text : 'NEXT: Job complete';
+    h.missionNext.textContent += '   ·   ' + fmtTimer(G.missions.timer);
+  } else if (G.missions.state === 'done') {
+    h.missionTitle.textContent = 'ALL 8 JOBS COMPLETE';
+    h.missionObj.textContent = 'Mara vanished into the delta. The ledger is hers.';
+    h.missionNext.textContent = '';
+  }
+  // APD panel
+  const units = G.police.units;
+  h.apdTitle.textContent = `APD RESPONSE — ${units.length} UNITS · CODE ${p.wanted}`;
+  h.apdUnits.innerHTML = units.slice(0, 5).map((u) => `${u.name} ${u.dist}m ${u.tactic}`).join('<br>') +
+    (units.length > 5 ? `<br>+${units.length - 5} more units in the search zone` : '');
+  // top right
+  h.clock.textContent = `DAY ${G.time.day} · ${fmtTime(G)}`;
+  h.money.textContent = '$' + p.money.toLocaleString('en-US');
+  h.stars.textContent = '\u2605'.repeat(p.wanted) + '\u2606'.repeat(5 - p.wanted);
+  h.tide.textContent = tideLabel(G);
+  const near = units[0];
+  h.insight.textContent = near ? `IN SIGHT · ${near.name}` : 'NOT SPOTTED';
+  // weapons
+  h.weapons.innerHTML = WEAPONS.map((w, i) => {
+    const sel = i === p.weapon ? ' sel' : '';
+    const ammo = w.mag === 0 ? '' : ` ${p.ammo[i]}/${p.reserve[i]}`;
+    return `<span class="wslot${sel}">${i + 1} ${w.name}${ammo}</span>`;
+  }).join(' ');
+  // district + vitals
+  h.district.textContent = districtAt(p.pos.x, p.pos.z);
+  h.vitals.innerHTML = `HEALTH ${Math.round(p.health)} &nbsp; ARMOUR ${Math.round(p.armour)}<br>REP ${Math.floor(p.rep / 400) + 1} DELTA LEGEND ${Math.round(p.rep)}/2.400`;
+  // vehicle panel
+  const stn = RADIO[G.radio.station];
+  h.radio.textContent = `${stn.name} · ${stn.song} — ${stn.band}`;
+  if (p.mode === 'car' && p.vehicle) {
+    h.carName.textContent = p.vehicle.def.name + (p.vehicle.stolen ? '  ·  VEHICLE STOLEN' : '');
+    h.cond.textContent = `CONDITION ${Math.round(p.vehicle.condition || 82)}% · NITRO ${Math.round(p.nitro)}%`;
+    h.speed.textContent = Math.round(Math.abs(p.vehicle.speed) * 3.6) + ' KM/H';
+  } else if (p.mode === 'boat' && p.boat) {
+    h.carName.textContent = 'DELTA SKIFF';
+    h.cond.textContent = `TIDE ${G.city.tide > 0.5 ? 'RISING' : 'FALLING'} · BOAT ${Math.round(p.boat.speed * 3.6)} KM/H`;
+    h.speed.textContent = Math.round(Math.abs(p.boat.speed) * 3.6) + ' KM/H';
+  } else {
+    h.carName.textContent = 'ON FOOT — MARA VELA';
+    h.cond.textContent = 'FISTS READY';
+    h.speed.textContent = Math.round(p.speed * 3.6) + ' KM/H';
+  }
+  // overlays
+  h.title.style.display = G.mode === 'title' ? 'flex' : 'none';
+  h.pause.style.display = G.mode === 'pause' ? 'flex' : 'none';
+  if (G.mode === 'wasted') {
+    h.over.style.display = 'flex';
+    h.over.innerHTML = '<div class="gametitle small">WASTED</div><div class="menunote">Mara was busted by the APD. Press ENTER to retry the job.</div>';
+  } else if (G.mode === 'complete') {
+    h.over.style.display = 'flex';
+    h.over.innerHTML = '<div class="gametitle small">VANISHED</div><div class="menunote">All 8 jobs complete. Mara disappeared into the delta with the ledger.</div>';
+  } else {
+    h.over.style.display = 'none';
   }
 }

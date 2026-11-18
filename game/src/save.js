@@ -1,29 +1,39 @@
-// Save / load in localStorage. Autosaves after each job and at the safehouse.
-import { CFG } from './config.js';
-
+// Save: autosave + slots in localStorage.
 const KEY = 'aurelia-delta-save-v1';
-export function loadSave() {
+
+export function saveGame(G) {
+  try {
+    const p = G.player;
+    const data = {
+      money: p.money, rep: p.rep, mission: G.missions.index,
+      health: p.health, armour: p.armour,
+      x: p.pos.x, z: p.pos.z, day: G.time.day, t: G.time.t,
+    };
+    localStorage.setItem(KEY, JSON.stringify(data));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadGame(G) {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
-    const s = JSON.parse(raw);
-    if (typeof s.money !== 'number' || typeof s.jobIndex !== 'number') return null;
-    return s;
-  } catch { return null; }
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
-export function writeSave(state) {
+
+export function hasSave() {
   try {
-    localStorage.setItem(KEY, JSON.stringify({
-      money: state.money, rep: state.rep, jobIndex: state.jobIndex,
-      garageColor: state.garageColor, muted: state.muted,
-      best: state.best, savedAt: Date.now(),
-    }));
-  } catch { /* storage unavailable: the game still plays */ }
+    return localStorage.getItem(KEY) !== null;
+  } catch {
+    return false;
+  }
 }
-export function clearSave() { try { localStorage.removeItem(KEY); } catch { /* ignore */ } }
-export function freshState() {
-  return {
-    money: CFG.tuning.moneyStart, rep: 0, jobIndex: 0,
-    garageColor: 0xd21f2b, muted: false, best: 0,
-  };
+
+export function clearSave() {
+  try { localStorage.removeItem(KEY); } catch { /* ignore */ }
 }

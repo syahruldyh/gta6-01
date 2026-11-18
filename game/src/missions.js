@@ -1,91 +1,92 @@
-// One mission system: an 8-job chain. Each job is a short list of stages
-// (goto / steal / pickup / fight / jump / boat / boatgoto). The HUD reads the
-// current job + stage; the autopilot in shots.js drives the same stages.
-import { CFG, dist2 } from './config.js';
+// The 8 jobs as ONE mission system: a chain with stages, objectives, dialog,
+// timers and win/fail. The HUD reads the current stage; the autopilot drives it.
+import { MISSIONS } from './config.js';
+import { setWanted } from './police.js';
 
-export class Missions {
-  constructor() {
-    this.jobs = CFG.jobs;
-    this.jobIndex = 0;
-    this.stageIndex = 0;
-    this.timer = 0;
-    this.done = false;
-    this.allDone = false;
-    this.message = '';
-    this.messageT = 0;
-    this.foesDown = 0;
-  }
-  get job() { return this.jobs[this.jobIndex]; }
-  get stage() { return this.job ? this.job.stages[this.stageIndex] : null; }
-  get stageCount() { return this.job ? this.job.stages.length : 0; }
-  startJob(i) {
-    this.jobIndex = i;
-    this.stageIndex = 0;
-    this.timer = 0;
-    this.done = false;
-    this.foesDown = 0;
-    const j = this.jobs[i];
-    this.say(`${j.title} — ${j.brief}`);
-    return j;
-  }
-  say(text, secs = 5) { this.message = text; this.messageT = secs; }
-  update(dt) {
-    this.timer += dt;
-    if (this.messageT > 0) this.messageT -= dt;
-  }
-  // Returns 'job-done' | 'all-done' | null. Called by main.js when a stage's
-  // condition is met (reached marker, stole car, picked up, foes down, jumped).
-  advance() {
-    if (this.allDone) return null;
-    this.stageIndex++;
-    if (this.stageIndex >= this.job.stages.length) {
-      const reward = this.job.reward;
-      this.jobIndex++;
-      this.stageIndex = 0;
-      this.timer = 0;
-      this.foesDown = 0;
-      if (this.jobIndex >= this.jobs.length) {
-        this.allDone = true;
-        this.say('AURELIA DELTA COMPLETE — Mara vanished into the delta. The ledger is ours.', 8);
-        return 'all-done';
-      }
-      const j = this.jobs[this.jobIndex];
-      this.say(`JOB ${this.jobIndex + 1}/8 — ${j.title}: ${j.brief}`);
-      return 'job-done';
+export function initMissions(G) {
+  G.missions = {
+    index: 0, stage: 0, timer: 0, state: 'idle', // idle | active | done
+    completed: 0, guards: [], ledger: false,
+  };
+}
+
+export function currentJob(G) {
+  return MISSIONS[G.missions.index];
+}
+
+export function currentStage(G) {
+  const job = currentJob(G);
+  return job ? job.stages[G.missions.stage] : null;
+}
+
+export function startMission(G, n) {
+  const m = G.missions;
+  m.index = n; m.stage = 0; m.timer = 0; m.state = 'active';
+  const job = MISSIONS[n];
+  setWanted(G, job.wanted);
+  G.time.day = n + 1 > 3 ? 3 : n + 1;
+  const st = job.stages[0];
+  if (st && st.dialog) G.hud.say(st.dialog[0], st.dialog[1], st.dialog[2]);
+  if (G.hud) G.hud.location('JOB ' + job.id + ' — ' + job.title);
+}
+
+export function nextStage(G) {
+  const m = G.missions;
+  const job = currentJob(G);
+  m.stage++;
+  if (m.stage >= job.stages.length) {
+    // job complete
+    m.completed++;
+    G.player.money += 2500 + job.id * 1500;
+    G.player.rep += 120;
+    if (G.hud) {
+      G.hud.floatText('JOB COMPLETE  +$' + (2500 + job.id * 1500));
+      G.hud.say('SINTA', 'Getaway Planner', 'Job ' + job.id + ' done, Mara. ' + (job.id < 8 ? 'Next one is waiting.' : 'That was the last one. Vanish!'));
     }
-    return null;
+    if (m.index + 1 < MISSIONS.length) {
+      startMission(G, m.index + 1);
+    } else {
+      m.state = 'done';
+      G.mode = 'complete';
+    }
+    return;
   }
-  // Is the player close enough to the current stage's marker?
-  atStageTarget(x, z) {
-    const s = this.stage;
-    if (!s || !s.at) return false;
-    const r = s.r || 10;
-    return dist2(x, z, s.at[0], s.at[1]) < r * r;
+  const st = job.stages[m.stage];
+  if (st.dialog && G.hud) G.hud.say(st.dialog[0], st.dialog[1], st.dialog[2]);
+}
+
+// Called every frame while a mission is active: checks whether the current
+// stage's objective is met. Returns true when a stage was completed.
+export function updateMissions(G, dt) {
+  const m = G.missions;
+  if (m.state !== 'active' || G.mode !== 'play') return false;
+  m.timer += dt;
+  const st = currentStage(G);
+  if (!st) return false;
+  const p = G.player;
+  const dx = p.pos.x - st.x, dz = p.pos.z - st.z;
+  const d2 = dx * dx + dz * dz;
+  const reach = st.type === 'boat' ? 16 : (st.type === 'walk' || st.type === 'combat') ? 4 : 14;
+  if (st.type === 'combat') {
+    // stage completes when all guards are down
+    if (m.guards.length > 0 && m.guards.every((g) => g.dead)) nextStage(G);
+    return true;
   }
-  // Autopilot helper: where should the car drive to for the current stage?
-  driveTarget() {
-    const s = this.stage;
-    if (!s) return null;
-    if (s.type === 'goto' || s.type === 'steal' || s.type === 'pickup' || s.type === 'jump') return s.at;
-    if (s.type === 'boat') return s.at;
-    if (s.type === 'boatgoto') return s.at;
-    if (s.type === 'fight') return s.at;
-    return null;
+  if (d2 < reach * reach) {
+    // steal / boat stages need the right vehicle state
+    if (st.type === 'steal' && p.mode !== 'car') return false;
+    if (st.type === 'boat' && p.mode !== 'boat') return false;
+    nextStage(G);
+    return true;
   }
-  // Timer text mm:ss for the HUD.
-  timerText() {
-    const t = Math.floor(this.timer);
-    return `${String(Math.floor(t / 60)).padStart(1, '0')}:${String(t % 60).padStart(2, '0')}`;
-  }
-  // Short label for the HUD mission panel.
-  label() {
-    if (this.allDone) return 'ALL JOBS DONE';
-    const j = this.job;
-    return `JOB ${this.jobIndex + 1}/8 · ${j.title}`;
-  }
-  nextText() {
-    if (this.allDone) return '—';
-    const next = this.job.stages[this.stageIndex + 1];
-    return next ? `NEXT: ${next.text}` : 'NEXT: Job complete';
+  return false;
+}
+
+// Spawn the two armed guards for mission 5 (Night Market).
+export function spawnGuards(G) {
+  const m = G.missions;
+  m.guards = [];
+  for (const [x, z] of [[-28, 12], [-32, 6]]) {
+    m.guards.push({ x, z, health: 50, dead: false, mesh: null });
   }
 }

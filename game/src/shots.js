@@ -1,143 +1,250 @@
-// Screenshot staging: each shot sets the real game into a real state (real
-// objects, real HUD, real mission) and freezes it, then the page signals
-// window.__shotReady. Triggered by ?shot=cover|onfoot|start|boat&seed=1.
-// The cover is the jump: the red MERAK GT airborne over the gap of the raised
-// drawbridge, police behind, helicopter above, police boat in the water below.
+// Shots: deterministic staging for the 4 screenshots, and the autopilot that
+// plays all 8 jobs for the playtest. Query params: ?shot=cover|onfoot|start|boat
+// and ?autopilot=1&ff=12. Everything is seeded, so the same frame repeats.
 import * as THREE from 'three';
-import { CFG } from './config.js';
-import { Car } from './vehicles.js';
-import { Boat } from './boats.js';
+import { VEHICLES } from './config.js';
+import { Car, nearestCar } from './vehicles.js';
+import { nearestBoat } from './boats.js';
+import { setBridgeAngle } from './city.js';
+import { startMission, currentStage } from './missions.js';
+import { setWanted, spawnHeli, spawnPoliceBoat } from './police.js';
 
-function placePoliceCar(G, x, z, heading) {
-  const c = new Car({ ...CFG.vehicles.police }, x, z, heading);
-  c.unit = G.police.unitName();
-  c.speed = 0;
-  G.scene.add(c.mesh);
-  G.police.cars.push(c);
-  return c;
+function angDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }
-function clearPolice(G) {
-  for (const c of G.police.cars) G.scene.remove(c.mesh);
-  G.police.cars = [];
-  if (G.police.heli) { G.scene.remove(G.police.heli.mesh); G.police.heli = null; }
-  if (G.police.boat) { G.scene.remove(G.police.boat.mesh); G.police.boat = null; }
+
+// Steer the player toward a waypoint; returns true when close.
+// A stopped car cannot turn (heading changes with speed), so when the
+// player is nearly stopped we always throttle — the car turns as it moves.
+function steerTo(G, x, z, arrive = 6) {
+  const p = G.player;
+  const dx = x - p.pos.x, dz = z - p.pos.z;
+  const dist = Math.hypot(dx, dz);
+  const want = Math.atan2(dx, dz);
+  const dh = angDiff(want, p.heading);
+  const inp = G.input;
+  inp.left = dh > 0.12;
+  inp.right = dh < -0.12;
+  const stopped = Math.abs(p.speed || 0) < 3;
+  inp.forward = stopped || Math.abs(dh) < 2.2;
+  inp.back = !stopped && Math.abs(dh) > 2.4 && dist > 10;
+  inp.handbrake = false;
+  // speed control in a car: slow down as the target gets close, and when
+  // the heading error is large, so the car can actually hit the waypoint
+  // instead of overshooting it at full speed and looping around.
+  if (p.mode === 'car' && p.vehicle) {
+    const spd = Math.abs(p.speed || 0);
+    const top = p.vehicle.def.top;
+    let desired = Math.min(top, Math.max(6, dist * 0.45));
+    if (Math.abs(dh) > 0.9) desired = Math.min(desired, 10);
+    if (spd > desired + 2) { inp.forward = false; inp.back = true; }
+  }
+  return dist < arrive;
 }
 
 export function stageShot(G, name) {
-  // G: the game object from main.js (scene, city, tide, police, missions,
-  // combat, hud, state, playerCar, playerBoat, playerMesh, setMode, ...).
-  clearPolice(G);
-  G.combat.clearFoes();
-  G.missions.allDone = false;
-  const st = G.state;
-  if (name === 'cover') {
-    G.city.bridge.setAngle(CFG.bridge.maxAngle);
-    G.tide.t = 30; G.tide.update(0); // TIDE: RISING
-    G.missions.startJob(7);
-    G.missions.stageIndex = 2; // Jump the rising bridge
-    G.missions.timer = 179; // 2:59
-    st.money = 48250; st.day = 3; st.timeMin = 18 * 60 + 52;
-    st.rep = 1960; st.repLevel = 5;
-    // The jump: red MERAK GT airborne over the gap, nose up, 150 KM/H.
-    const car = G.playerCar;
-    car.pos.set(240, 23.6, 0);
-    car.heading = Math.PI / 2; // east, across the bridge
-    car.speed = 41.7; car.vy = 1.5; car.airborne = true;
-    car.condition = 82; car.nitro = 64;
-    car.mesh.position.copy(car.pos);
-    car.mesh.rotation.set(0, 0, 0.22); // nose up over the gap
-    car.mesh.rotation.y = car.heading - Math.PI / 2;
-    G.setMode('car');
-    // Police behind on the west leaf + one on the far side, helicopter above.
-    placePoliceCar(G, 208, -3, Math.PI / 2).speed = 34;
-    placePoliceCar(G, 196, 3, Math.PI / 2).speed = 30;
-    placePoliceCar(G, 268, 2, -Math.PI / 2).speed = 20;
-    G.police.wanted = 5;
-    G.police.spawnHeli(car);
-    G.police.heli.pos.set(214, 46, -28);
-    // Police boat in the water below the bridge (north side, in frame).
-    G.police.boat = new Boat(G.scene, 258, -38, Math.PI, 0x11151c);
-    // The getaway boat waiting past the cranes (south water, lower right).
-    G.playerBoat.pos.set(266, G.tide.level, 58);
-    G.playerBoat.heading = Math.PI;
-    G.playerBoat.mesh.position.copy(G.playerBoat.pos);
-    G.playerBoat.mesh.rotation.y = G.playerBoat.heading - Math.PI / 2;
-    G.playerBoat.mesh.visible = true;
-    G.combat.select(2); // SMG 32/128
-    G.combat.weapons[2].inMag = 32; G.combat.weapons[2].reserve = 128;
-    G.combat.weapons[1].inMag = 12; G.combat.weapons[1].reserve = 48;
-    G.combat.weapons[3].inMag = 6; G.combat.weapons[3].reserve = 18;
-    G.missions.say('<b>SINTA — GETAWAY PLANNER</b> — "The bridge is rising, Mara! Don\'t stop — the boat is waiting past the cranes!"', 60);
-    G.hud.addFloater('DRIFT x3 +$150 · NEAR MISS +$250');
-    G.shotCam = { pos: new THREE.Vector3(206, 10, 62), look: new THREE.Vector3(248, 21, 0) };
-    G.shotLabel = '1-cover.jpg';
-  } else if (name === 'onfoot') {
-    G.city.bridge.setAngle(0);
-    G.tide.t = 120; G.tide.update(0);
-    G.missions.startJob(4);
-    G.missions.stageIndex = 1; // fight
-    G.missions.timer = 64;
-    st.money = 12400; st.day = 2; st.timeMin = 21 * 60 + 30;
-    st.rep = 1200; st.repLevel = 4;
-    // Mara on foot in the Fishmarket, pistol out, foes ahead.
-    G.setMode('foot');
-    G.playerMesh.position.set(-150, 0, 100);
-    G.playerHeading = Math.atan2(-6, -14);
-    G.playerMesh.rotation.y = G.playerHeading;
-    G.playerCar.mesh.visible = false;
-    G.combat.select(1); // PISTOL 12/48
-    G.combat.weapons[1].inMag = 12; G.combat.weapons[1].reserve = 48;
-    G.combat.spawnFoes(-150, 100, 3, G.playerMesh.position);
-    G.combat.foes[0].mesh.position.set(-144, 0, 88);
-    G.combat.foes[1].mesh.position.set(-158, 0, 86);
-    G.combat.foes[2].mesh.position.set(-140, 0, 104);
-    G.police.wanted = 3;
-    placePoliceCar(G, -120, 80, Math.PI);
-    placePoliceCar(G, -182, 122, 0);
-    G.police.spawnHeli(G.playerMesh.position);
-    G.police.heli.pos.set(-168, 44, 76);
-    G.missions.say('<b>RATNA "IBU" KUSUMA — FIXER</b> — "The buyer brought friends, Mara. End it, then get to the safehouse."', 60);
-    G.shotCam = { pos: new THREE.Vector3(-160, 5, 130), look: new THREE.Vector3(-148, 1.6, 92) };
-    G.shotLabel = '2-onfoot.jpg';
-  } else if (name === 'start') {
-    G.city.bridge.setAngle(0.1);
-    G.tide.t = 200; G.tide.update(0);
-    G.missions.startJob(0);
-    st.money = 250; st.day = 1; st.timeMin = 18 * 60 + 12;
-    G.setMode('title');
-    // A parked MERAK GT + traffic on the boulevard for the title backdrop.
-    const car = G.playerCar;
-    car.pos.set(-40, 0, -4); car.heading = Math.PI / 2; car.speed = 0;
-    car.mesh.position.copy(car.pos);
-    car.mesh.rotation.set(0, 0, 0);
-    car.mesh.rotation.y = car.heading - Math.PI / 2;
-    G.shotCam = { pos: new THREE.Vector3(96, 26, 298), look: new THREE.Vector3(-20, 12, -40) };
-    G.shotLabel = '3-start.jpg';
-  } else if (name === 'boat') {
-    G.city.bridge.setAngle(0.35);
-    G.tide.t = 60; G.tide.update(0); // TIDE: HIGH
-    G.missions.startJob(6);
-    G.missions.stageIndex = 2; // outrun the APD down the river
-    G.missions.timer = 96;
-    st.money = 32100; st.day = 3; st.timeMin = 19 * 60 + 5;
-    st.rep = 1750; st.repLevel = 5;
-    G.setMode('boat');
-    const boat = G.playerBoat;
-    boat.pos.set(255, G.tide.level, 150);
-    boat.heading = 0; // south, down the river
-    boat.speed = 21;
-    boat.mesh.position.copy(boat.pos);
-    boat.mesh.rotation.y = boat.heading - Math.PI / 2;
-    boat.mesh.visible = true;
-    G.playerCar.mesh.visible = false;
-    G.police.wanted = 5;
-    G.police.spawnHeli(boat);
-    G.police.heli.pos.set(238, 46, 118);
-    G.police.boat = new Boat(G.scene, 250, 96, 0, 0x11151c);
-    G.missions.say('<b>SINTA — GETAWAY PLANNER</b> — "High tide, Mara — the channel is open. Don\'t let the boat cops box you in!"', 60);
-    G.shotCam = { pos: new THREE.Vector3(258, 18, 185), look: new THREE.Vector3(252, 0, 120) };
-    G.shotLabel = '4-boat.jpg';
+  const p = G.player;
+  if (name === 'start') {
+    G.mode = 'title';
+    p.pos.set(0, 0, 100);
+    p.heading = Math.PI;
+    return;
   }
-  G.frozen = true;
-  G.shotName = name;
+  G.mode = 'play';
+  G.shotFrozen = true;
+  if (name === 'cover') {
+    // Mission 8, stage 3/3: the MERAK GT airborne over the rising drawbridge.
+    startMission(G, 7);
+    G.missions.stage = 2;
+    G.missions.timer = 179;
+    setWanted(G, 5);
+    setBridgeAngle(G, 0.35);
+    G.city.bridge.target = 0.35;
+    p.money = 48250; p.rep = 1960; p.health = 82; p.armour = 64; p.nitro = 64;
+    p.weapon = 2; p.ammo = [0, 12, 32, 6]; p.reserve = [0, 48, 128, 18];
+    // the red MERAK GT mid-jump over the gap, high and nose-up so the
+    // airborne arc reads against the sky
+    const car = new Car(VEHICLES[0], 0, 183, 0);
+    car.speed = 42; car.stolen = true; car.condition = 82;
+    car.mesh.position.set(0, 10, 183);
+    car.mesh.rotation.x = -0.15;
+    G.scene.add(car.mesh);
+    p.vehicle = car; p.mode = 'car';
+    p.pos.set(0, 10, 183); p.heading = 0; p.speed = 42;
+    // two APD cruisers chasing across the bridge behind
+    for (const [z, x] of [[150, -6], [138, 7]]) {
+      const pc = new Car(VEHICLES[4], x, z, 0);
+      pc.speed = 40; pc.police = true; pc.unit = 'HERON-2';
+      G.scene.add(pc.mesh);
+      G.police.cars.push(pc);
+      G.police.units.push({ name: 'HERON-2', tactic: 'RAMMING', dist: 24 });
+    }
+    G.police.units.push(
+      { name: 'MERAK-5', tactic: 'PURSUIT', dist: 14 },
+      { name: 'ELANG-7', tactic: 'ROADBLOCK', dist: 22 },
+      { name: 'GULL-3', tactic: 'SEARCHLIGHT', dist: 40 },
+      { name: 'TIDE-1', tactic: 'PURSUIT', dist: 55 },
+    );
+    // AIR-1 overhead with its spotlight, clear of the car against the sky
+    const heli = spawnHeli(G);
+    heli.position.set(-22, 16, 190);
+    heli.rotation.y = Math.PI;
+    heli.userData.spot.target.position.set(-14, -34, 12);
+    // police boat in the canal gap directly below the jumping car
+    const pb = spawnPoliceBoat(G);
+    pb.pos.set(2, 0, 181); pb.heading = 0; pb.updateMesh();
+    // the escape boat waiting past the cranes
+    G.escapeBoat.pos.set(-14, 0, 236); G.escapeBoat.heading = 0.4; G.escapeBoat.updateMesh();
+    G.hud.say('SINTA', 'Getaway Planner', 'The bridge is rising, Mara! Don\u2019t stop — the boat is waiting past the cranes!');
+    G.hud.floatText('DRIFT x3 +$150');
+    G.hud.floatText('NEAR MISS +$250');
+    // low, close, looking slightly up: the car looms against the orange
+    // sky, the dark deck falls away below it; high enough to see the
+    // police boat in the canal gap below the car
+    G.shotCam = { pos: [16, 7, 169], look: [0, 7.5, 183] };
+  } else if (name === 'onfoot') {
+    // Mission 5, Night Market: Mara on foot in the Fishmarket, pistol out.
+    startMission(G, 4);
+    G.missions.stage = 1;
+    setWanted(G, 3);
+    p.pos.set(-38, 0, 4); p.heading = 0.5; p.mode = 'foot';
+    p.weapon = 1; p.ammo = [0, 12, 32, 6]; p.reserve = [0, 48, 128, 18];
+    p.money = 12500; p.rep = 980; p.health = 88; p.armour = 40;
+    G.missions.guards = [
+      { x: -28, z: 12, health: 50, dead: false, mesh: null },
+      { x: -32, z: 6, health: 50, dead: false, mesh: null },
+    ];
+    G.hud.say('SINTA', 'Getaway Planner', 'They drew first. Finish it and run!');
+    G.hud.floatText('NIGHT MARKET · FISHMARKET');
+    G.shotCam = { pos: [-24, 6, -14], look: [-38, 1.2, 4] };
+  } else if (name === 'boat') {
+    // The delta skiff at dusk: cranes, AIR-1 searchlight, open water.
+    startMission(G, 7);
+    G.missions.stage = 2;
+    setWanted(G, 5);
+    p.money = 48250; p.rep = 1960;
+    const boat = G.escapeBoat;
+    boat.pos.set(0, 0, 248); boat.heading = Math.PI; boat.speed = 14;
+    p.boat = boat; p.mode = 'boat';
+    p.pos.copy(boat.pos); p.heading = Math.PI; p.speed = 14;
+    const pb2 = spawnPoliceBoat(G);
+    pb2.pos.set(14, 0, 236); pb2.heading = Math.PI * 0.8; pb2.updateMesh();
+    const heli2 = spawnHeli(G);
+    heli2.position.set(-8, 22, 244);
+    heli2.rotation.y = 0.6;
+    G.hud.say('SINTA', 'Getaway Planner', 'The tide is with you tonight. Vanish into the delta.');
+    // behind the skiff looking south: the boat centred, the bridge and
+    // cranes and orange sky beyond it, police boat and AIR-1 in frame
+    G.shotCam = { pos: [12, 5, 264], look: [0, 1, 246] };
+  }
+}
+
+// The autopilot: plays the current mission stage. Called every frame when
+// G.autopilot is on. It writes G.input and performs enter/steal/board actions.
+export function autopilotStep(G, dt) {
+  const p = G.player;
+  const m = G.missions;
+  if (m.state !== 'active' || G.mode !== 'play') return;
+  const cur = currentStage(G);
+  if (!cur) return;
+  const inp = G.input;
+  inp.forward = false; inp.back = false; inp.left = false; inp.right = false; inp.handbrake = false;
+  inp.shoot = false;
+  // --- on-foot handling: walk to a car, steal it, or walk to the target ---
+  if (cur.type === 'steal' || cur.type === 'drive' || cur.type === 'boat') {
+    if (p.mode === 'boat') {
+      if (cur.type === 'boat') {
+        // already in the boat: steer it to the target
+        steerTo(G, cur.x, cur.z, 12);
+        return;
+      }
+      // a drive/steal stage while in the boat: get out and find a car
+      G.exitBoat();
+      return;
+    }
+    if (p.mode === 'foot') {
+      if (cur.type === 'boat') {
+        // walk to the escape boat and board it
+        const b = nearestBoat(G, p.pos.x, p.pos.z, 400);
+        if (b) {
+          if (steerTo(G, b.pos.x, b.pos.z, 4)) {
+            G.boardBoat(b);
+            return;
+          }
+          p.speed = 6;
+          return;
+        }
+      }
+      const car = nearestCar(G, p.pos.x, p.pos.z, 400);
+      if (car) {
+        if (steerTo(G, car.pos.x, car.pos.z, 3)) {
+          G.enterCar(car, true);
+          return;
+        }
+        p.speed = 6;
+        return;
+      }
+    }
+  }
+  if (cur.type === 'walk' || cur.type === 'combat') {
+    if (p.mode === 'car') { G.exitCar(); return; }
+    if (p.mode === 'boat') { G.exitBoat(); return; }
+    if (cur.type === 'combat') {
+      const guards = m.guards.filter((g) => !g.dead);
+      if (guards.length === 0) return;
+      const g = guards[0];
+      const d = Math.hypot(g.x - p.pos.x, g.z - p.pos.z);
+      if (d > 24) {
+        steerTo(G, g.x, g.z, 20);
+        p.speed = 6;
+        return;
+      }
+      // face the guard and shoot
+      p.heading = Math.atan2(g.x - p.pos.x, g.z - p.pos.z);
+      p.weapon = 1;
+      inp.shoot = true;
+      return;
+    }
+    steerTo(G, cur.x, cur.z, 3);
+    p.speed = 6;
+    return;
+  }
+  if (cur.type === 'boat') {
+    if (p.mode === 'boat') {
+      steerTo(G, cur.x, cur.z, 12);
+      return;
+    }
+    if (p.mode === 'car') {
+      // if the boat is close, just get out and walk to it (no need to drive
+      // back across the bridge); otherwise drive to the dock road first
+      const b = nearestBoat(G, p.pos.x, p.pos.z, 400);
+      const boatNear = b && Math.hypot(b.pos.x - p.pos.x, b.pos.z - p.pos.z) < 35;
+      if (boatNear) { G.exitCar(); return; }
+      if (steerTo(G, 0, 145, 10)) { G.exitCar(); return; }
+      return;
+    }
+  }
+  if (cur.type === 'drive' || cur.type === 'steal') {
+    if (p.mode !== 'car') return;
+    // route across the canal via the bridge road
+    const crosses = (p.pos.z < 160 && cur.z > 200) || (p.pos.z > 200 && cur.z < 160);
+    if (crosses) {
+      const via = p.pos.z < 160 ? { x: 0, z: 145 } : { x: 0, z: 215 };
+      if (Math.hypot(p.pos.x - via.x, p.pos.z - via.z) > 12) {
+        steerTo(G, via.x, via.z, 8);
+        return;
+      }
+    }
+    // on the bridge itself: full throttle for the jump when it is raised
+    const onBridge = Math.abs(p.pos.x) < 14 && p.pos.z > 150 && p.pos.z < 210;
+    if (onBridge && G.city.bridge.angle > 0.05) {
+      inp.forward = true; inp.left = p.pos.x > 2; inp.right = p.pos.x < -2;
+      return;
+    }
+    steerTo(G, cur.x, cur.z, 10);
+    return;
+  }
 }

@@ -1,132 +1,73 @@
-// Renderer, golden-hour sky, sun + shadows, fog, chase camera, quality tiers.
-// ACES filmic tone mapping, exposure ~0.85, one shadow-casting sun at 7 degrees.
+// Renderer: three.js setup, golden-hour sky + sun, shadows, fog, chase camera.
 import * as THREE from 'three';
-import { CFG, clamp, lerp } from './config.js';
 
-export function createRenderer(canvas) {
+export function initRenderer(G) {
+  const canvas = document.getElementById('game');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  return renderer;
-}
-
-export function createSky(scene) {
-  // Gradient sky dome with a low sun glow, written as one small shader.
+  renderer.toneMappingExposure = 0.9;
+  const scene = new THREE.Scene();
+  // golden-hour sky: gradient dome
+  const skyGeo = new THREE.SphereGeometry(900, 24, 16);
   const skyMat = new THREE.ShaderMaterial({
-    side: THREE.BackSide, depthWrite: false, fog: false,
+    side: THREE.BackSide,
     uniforms: {
-      top: { value: new THREE.Color(CFG.colors.skyTop) },
-      mid: { value: new THREE.Color(0xc96a4a) },
-      horizon: { value: new THREE.Color(CFG.colors.skyHorizon) },
-      sunDir: { value: new THREE.Vector3(-0.55, 0.12, 0.82).normalize() },
-      sunCol: { value: new THREE.Color(CFG.colors.sun) },
+      top: { value: new THREE.Color(0x2a3a6a) },
+      mid: { value: new THREE.Color(0xff9a5a) },
+      bot: { value: new THREE.Color(0xffc07a) },
     },
-    vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-    fragmentShader: `varying vec3 vDir; uniform vec3 top, mid, horizon, sunDir, sunCol;
-      void main(){
-        float h = clamp(vDir.y, 0.0, 1.0);
-        vec3 col = mix(horizon, mid, smoothstep(0.0, 0.25, h));
-        col = mix(col, top, smoothstep(0.2, 0.65, h));
-        float s = max(dot(normalize(vDir), normalize(sunDir)), 0.0);
-        col += sunCol * (pow(s, 220.0) * 1.4 + pow(s, 18.0) * 0.35);
-        gl_FragColor = vec4(col, 1.0);
-      }`,
+    vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: `varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bot;
+      void main(){ float h = normalize(vP).y; vec3 c = h > 0.12 ? mix(mid, top, smoothstep(0.12, 0.65, h)) : mix(bot, mid, smoothstep(-0.08, 0.12, h)); gl_FragColor = vec4(c, 1.0); }`,
   });
-  const sky = new THREE.Mesh(new THREE.SphereGeometry(900, 24, 16), skyMat);
-  scene.add(sky);
-  scene.fog = new THREE.Fog(CFG.colors.fog, 180, 700);
-  return sky;
-}
-
-export function createLights(scene) {
-  const sun = new THREE.DirectionalLight(0xffd9a0, 3.4);
-  // Low sun, 7 degrees above the horizon, from the west-southwest.
-  sun.position.set(-260, 55, 380);
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+  scene.fog = new THREE.Fog(0xe8a06a, 220, 780);
+  // low sun, long shadows
+  const sun = new THREE.DirectionalLight(0xffd9a0, 2.4);
+  sun.position.set(-180, 90, 260);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -90; sun.shadow.camera.right = 90;
-  sun.shadow.camera.top = 90; sun.shadow.camera.bottom = -90;
-  sun.shadow.camera.near = 10; sun.shadow.camera.far = 900;
-  sun.shadow.bias = -0.0006;
-  sun.shadow.normalBias = 0.6;
+  sun.shadow.camera.left = -320; sun.shadow.camera.right = 320;
+  sun.shadow.camera.top = 320; sun.shadow.camera.bottom = -320;
+  sun.shadow.camera.far = 900;
   scene.add(sun);
-  scene.add(sun.target);
-  const hemi = new THREE.HemisphereLight(0x8aa0c0, 0x5a4a3a, 1.5);
+  scene.add(new THREE.AmbientLight(0x8a7a9a, 0.55));
+  const hemi = new THREE.HemisphereLight(0xffc890, 0x3a4a5a, 0.5);
   scene.add(hemi);
-  return { sun, hemi };
+  const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
+  G.renderer = renderer;
+  G.scene = scene;
+  G.camera = camera;
+  G.sun = sun;
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
 }
 
-// Chase camera: follows behind the target, eases, never clips the ground.
-export class ChaseCam {
-  constructor(camera) {
-    this.camera = camera;
-    this.pos = new THREE.Vector3(0, 8, -20);
-    this.look = new THREE.Vector3();
-    this.yaw = 0; this.pitch = -0.12;
-  }
-  update(dt, target, heading, mode) {
-    const cam = this.camera;
-    if (mode === 'car') {
-      const back = 13.5, up = 5.2;
-      const tx = target.x - Math.sin(heading) * back, tz = target.z - Math.cos(heading) * back;
-      const want = new THREE.Vector3(tx, target.y + up, tz);
-      this.pos.lerp(want, 1 - Math.pow(0.0001, dt));
-      this.pos.y = Math.max(this.pos.y, target.y + 2.2);
-      this.look.lerp(new THREE.Vector3(target.x + Math.sin(heading) * 10, target.y + 2, target.z + Math.cos(heading) * 10), 1 - Math.pow(0.0001, dt));
-    } else if (mode === 'boat') {
-      const back = 16, up = 7;
-      const tx = target.x - Math.sin(heading) * back, tz = target.z - Math.cos(heading) * back;
-      const want = new THREE.Vector3(tx, target.y + up, tz);
-      this.pos.lerp(want, 1 - Math.pow(0.0001, dt));
-      this.look.lerp(new THREE.Vector3(target.x + Math.sin(heading) * 12, target.y + 1.5, target.z + Math.cos(heading) * 12), 1 - Math.pow(0.0001, dt));
-    } else { // on foot: orbit with the mouse yaw/pitch
-      const d = 7.5;
-      const want = new THREE.Vector3(
-        target.x - Math.sin(this.yaw) * Math.cos(this.pitch) * d,
-        target.y + 2.2 - Math.sin(this.pitch) * d,
-        target.z - Math.cos(this.yaw) * Math.cos(this.pitch) * d);
-      this.pos.lerp(want, 1 - Math.pow(0.00001, dt));
-      this.pos.y = Math.max(this.pos.y, target.y + 0.6);
-      this.look.lerp(new THREE.Vector3(target.x, target.y + 1.6, target.z), 1 - Math.pow(0.00001, dt));
-    }
-    cam.position.copy(this.pos);
-    cam.lookAt(this.look);
-  }
-  snap(target, heading, mode) {
-    const back = mode === 'car' ? 13.5 : mode === 'boat' ? 16 : 7.5;
-    const up = mode === 'car' ? 5.2 : mode === 'boat' ? 7 : 2.2;
-    this.pos.set(target.x - Math.sin(heading) * back, target.y + up, target.z - Math.cos(heading) * back);
-    this.look.set(target.x + Math.sin(heading) * 10, target.y + 2, target.z + Math.cos(heading) * 10);
-    this.camera.position.copy(this.pos);
-    this.camera.lookAt(this.look);
-  }
+// Chase camera: behind and above the player (car, boat or on foot), smoothed.
+export function updateCamera(G, dt) {
+  const p = G.player;
+  const cam = G.camera;
+  const back = p.mode === 'foot' ? 7 : p.mode === 'boat' ? 13 : 11;
+  const up = p.mode === 'foot' ? 3.2 : p.mode === 'boat' ? 5 : 4.2;
+  const tx = p.pos.x - Math.sin(p.heading) * back;
+  const tz = p.pos.z - Math.cos(p.heading) * back;
+  const k = Math.min(1, dt * 4);
+  cam.position.x += (tx - cam.position.x) * k;
+  cam.position.y += (p.pos.y + up - cam.position.y) * k;
+  cam.position.z += (tz - cam.position.z) * k;
+  cam.lookAt(p.pos.x + Math.sin(p.heading) * 6, p.pos.y + 1.5, p.pos.z + Math.cos(p.heading) * 6);
 }
 
-// Quality tiers: drop a tier on their own after 3 s of slow frames, never mid-shot.
-export class Quality {
-  constructor(renderer) { this.renderer = renderer; this.tier = 0; this.slowSecs = 0; }
-  noteFrame(ms) {
-    if (ms > 20) this.slowSecs += ms / 1000; else this.slowSecs = 0;
-    if (this.slowSecs > 3 && this.tier < 2) {
-      this.tier++; this.slowSecs = 0;
-      this.apply();
-    }
-  }
-  apply() {
-    const r = this.renderer;
-    if (this.tier === 0) { r.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); r.shadowMap.enabled = true; }
-    if (this.tier === 1) { r.setPixelRatio(1.5); r.shadowMap.enabled = true; }
-    if (this.tier === 2) { r.setPixelRatio(1); r.shadowMap.enabled = false; }
-  }
-}
-export function resizeRenderer(renderer, camera) {
-  const w = window.innerWidth, h = window.innerHeight;
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.fov = h > w ? 52 : 38;
-  camera.updateProjectionMatrix();
+// A fixed cinematic camera for a staged shot (position + look target).
+export function shotCamera(G, pos, look) {
+  const cam = G.camera;
+  cam.position.set(pos[0], pos[1], pos[2]);
+  cam.lookAt(look[0], look[1], look[2]);
 }

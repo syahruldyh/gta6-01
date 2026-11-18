@@ -1,70 +1,78 @@
-// Pedestrians: low-poly walkers on the sidewalks. They stroll between random
-// waypoints, flee from a speeding car or gunfire, and panic when one is hit.
+// Pedestrians: walkers on the sidewalks who flee when a car or a gun comes close.
 import * as THREE from 'three';
-import { CFG, dist2 } from './config.js';
-import { mulberry32, range, pick } from './random.js';
+import { MAP } from './config.js';
+import { RNG } from './random.js';
 
-const SHIRT = [0xc23b2a, 0x2b5fd9, 0xe8b820, 0x3f7a3a, 0xe8e8e8, 0x8a2a6b, 0x2a8a7a];
-export class Pedestrians {
-  constructor(scene, rng, groundHeight) {
-    this.list = [];
-    this.groundHeight = groundHeight;
-    const bodyGeo = new THREE.CylinderGeometry(0.32, 0.42, 1.15, 8);
-    const headGeo = new THREE.SphereGeometry(0.26, 8, 6);
-    for (let i = 0; i < CFG.tuning.pedCount; i++) {
-      const g = new THREE.Group();
-      const body = new THREE.Mesh(bodyGeo, new THREE.MeshLambertMaterial({ color: pick(rng, SHIRT) }));
-      body.position.y = 0.95; body.castShadow = true; g.add(body);
-      const head = new THREE.Mesh(headGeo, new THREE.MeshLambertMaterial({ color: 0xd9a986 }));
-      head.position.y = 1.75; head.castShadow = true; g.add(head);
-      const x = range(rng, -280, 180), z = range(rng, -280, 220);
-      g.position.set(x, groundHeight(x, z), z);
-      scene.add(g);
-      this.list.push({
-        mesh: g, x, z, heading: rng() * 6.28, speed: range(rng, 0.8, 1.6),
-        tx: x, tz: z, flee: 0, wait: range(rng, 0, 4),
-      });
-    }
+const SKIN = [0xd8a077, 0xb87a52, 0x8a5a3a, 0xe8c8a8];
+const SHIRTS = [0xe84a5a, 0x3fa7d6, 0xf2b705, 0x7ac74f, 0x9a6ad6, 0xe8e8e8, 0xff7a3c];
+
+export function makePedMesh(rng) {
+  const g = new THREE.Group();
+  const skin = new THREE.MeshLambertMaterial({ color: SKIN[rng.int(0, SKIN.length - 1)] });
+  const shirt = new THREE.MeshLambertMaterial({ color: SHIRTS[rng.int(0, SHIRTS.length - 1)] });
+  const legs = new THREE.MeshLambertMaterial({ color: 0x2a2a3a });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.75, 0.32), shirt);
+  body.position.y = 1.05; body.castShadow = true; g.add(body);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), skin);
+  head.position.y = 1.65; g.add(head);
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.7, 0.2), legs);
+  legL.position.set(-0.14, 0.35, 0); g.add(legL);
+  const legR = legL.clone(); legR.position.x = 0.14; g.add(legR);
+  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.6, 0.16), shirt);
+  armL.position.set(-0.38, 1.05, 0); g.add(armL);
+  const armR = armL.clone(); armR.position.x = 0.38; g.add(armR);
+  return g;
+}
+
+export function spawnPeds(G) {
+  const rng = new RNG(G.seed + 23);
+  G.peds = [];
+  for (let i = 0; i < 26; i++) {
+    const x = rng.range(-260, 260);
+    const z = rng.range(-260, 140);
+    const mesh = makePedMesh(rng);
+    mesh.position.set(x, 0, z);
+    G.scene.add(mesh);
+    G.peds.push({
+      mesh, pos: mesh.position, heading: rng.range(0, Math.PI * 2),
+      speed: rng.range(1.2, 2.2), target: null, flee: 0, state: 'walk',
+      seed: rng.range(0, 100),
+    });
   }
-  update(dt, danger) {
-    // danger: {x, z, r, kind} — a car or a shot. Peds inside r flee.
-    for (const p of this.list) {
-      if (p.wait > 0) { p.wait -= dt; continue; }
-      let tx = p.tx, tz = p.tz, speed = p.speed;
-      if (danger && dist2(p.x, p.z, danger.x, danger.z) < danger.r * danger.r) {
-        const dx = p.x - danger.x, dz = p.z - danger.z;
-        const d = Math.hypot(dx, dz) || 1;
-        tx = p.x + (dx / d) * 30; tz = p.z + (dz / d) * 30;
-        speed = 4.5; p.flee = 2;
-      } else if (p.flee > 0) { p.flee -= dt; speed = 3.5; }
-      const dx = tx - p.x, dz = tz - p.z, d = Math.hypot(dx, dz);
-      if (d < 2) {
-        p.tx = p.x + range(Math.random, -60, 60);
-        p.tz = p.z + range(Math.random, -60, 60);
-        p.tx = Math.max(-280, Math.min(180, p.tx));
-        p.tz = Math.max(-280, Math.min(220, p.tz));
-        p.wait = range(Math.random, 0, 5);
-        continue;
+}
+
+export function updatePeds(G, dt) {
+  const p = G.player;
+  for (const ped of G.peds) {
+    // flee if the player (car or armed) is close
+    const dx = ped.pos.x - p.pos.x, dz = ped.pos.z - p.pos.z;
+    const d2 = dx * dx + dz * dz;
+    const danger = (p.mode !== 'foot' && d2 < 400) || (p.mode === 'foot' && p.weapon > 0 && d2 < 900);
+    if (danger) ped.flee = 2.5;
+    if (ped.flee > 0) {
+      ped.flee -= dt;
+      ped.heading = Math.atan2(dx, dz);
+      ped.speed = 5.5;
+    } else {
+      ped.speed = 1.6 + Math.sin(G.time.t * 0.5 + ped.seed) * 0.4;
+      // pick a new sidewalk waypoint when close to the current one
+      if (!ped.target || (ped.pos.x - ped.target[0]) ** 2 + (ped.pos.z - ped.target[1]) ** 2 < 4) {
+        const rx = MAP.roadsX[Math.floor(Math.random() * MAP.roadsX.length)];
+        const rz = MAP.roadsZ[Math.floor(Math.random() * MAP.roadsZ.length)];
+        ped.target = [rx + 9, rz + 9];
       }
-      const want = Math.atan2(dx, dz);
-      let dh = want - p.heading;
+      const want = Math.atan2(ped.target[0] - ped.pos.x, ped.target[1] - ped.pos.z);
+      let dh = want - ped.heading;
       while (dh > Math.PI) dh -= Math.PI * 2;
       while (dh < -Math.PI) dh += Math.PI * 2;
-      p.heading += Math.max(-3 * dt, Math.min(3 * dt, dh));
-      p.x += Math.sin(p.heading) * speed * dt;
-      p.z += Math.cos(p.heading) * speed * dt;
-      p.mesh.position.set(p.x, this.groundHeight(p.x, p.z), p.z);
-      p.mesh.rotation.y = -p.heading;
-      p.mesh.position.y += Math.abs(Math.sin(performance.now() * 0.006 + p.x)) * 0.06;
+      ped.heading += Math.max(-2 * dt, Math.min(2 * dt, dh));
     }
-  }
-  // The nearest ped within r of (x,z), for hit detection.
-  nearest(x, z, r) {
-    let best = null, bd = r * r;
-    for (const p of this.list) {
-      const d2 = dist2(x, z, p.x, p.z);
-      if (d2 < bd) { bd = d2; best = p; }
-    }
-    return best;
+    ped.pos.x += Math.sin(ped.heading) * ped.speed * dt;
+    ped.pos.z += Math.cos(ped.heading) * ped.speed * dt;
+    ped.pos.x = Math.max(-270, Math.min(270, ped.pos.x));
+    ped.pos.z = Math.max(-270, Math.min(150, ped.pos.z));
+    ped.mesh.rotation.y = ped.heading;
+    // walk bob
+    ped.mesh.position.y = Math.abs(Math.sin(G.time.t * 6 + ped.seed)) * 0.06;
   }
 }

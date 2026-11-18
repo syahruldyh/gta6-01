@@ -1,127 +1,113 @@
-// Combat: 4 weapons (FISTS / PISTOL / SMG / SHOTGUN), ammo + reload, shooting
-// by raycast from the camera through the crosshair, health / armour, and the
-// armed foes that appear in the NIGHT MARKET job.
+// Combat: fists / pistol / SMG / shotgun, hitscan shots, guard NPCs, damage.
 import * as THREE from 'three';
-import { CFG, clamp } from './config.js';
-import { mulberry32, range } from './random.js';
+import { WEAPONS } from './config.js';
+import { damagePlayer } from './police.js';
+import { makePedMesh } from './pedestrians.js';
+import { RNG } from './random.js';
 
-export class Combat {
-  constructor(scene) {
-    this.scene = scene;
-    this.weapons = CFG.weapons.map(w => ({ ...w, inMag: w.mag, reserve: w.ammo }));
-    this.current = 0;
-    this.cooldown = 0;
-    this.reloadT = 0;
-    this.health = 100;
-    this.armour = 50;
-    this.foes = [];
-    this.ray = new THREE.Raycaster();
-    this.tracer = null;
+export function initCombat(G) {
+  G.combat = { cooldown: 0, tracer: null, muzzle: 0 };
+  // a thin tracer line reused for every shot
+  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, 1)]);
+  G.combat.tracer = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0 }));
+  G.scene.add(G.combat.tracer);
+}
+
+function fireTracer(G, from, to) {
+  const t = G.combat.tracer;
+  t.geometry.setFromPoints([from, to]);
+  t.material.opacity = 0.9;
+  G.combat.muzzle = 0.12;
+}
+
+export function shoot(G) {
+  const p = G.player;
+  const c = G.combat;
+  if (c.cooldown > 0 || p.mode !== 'foot' && p.mode !== 'car') return;
+  const w = WEAPONS[p.weapon];
+  if (!w || w.mag === 0) return; // fists: handled by melee below
+  if (p.ammo[p.weapon] <= 0) {
+    // auto reload from reserve
+    const w2 = WEAPONS[p.weapon];
+    const take = Math.min(w2.mag, p.reserve[p.weapon]);
+    if (take > 0) { p.reserve[p.weapon] -= take; p.ammo[p.weapon] = take; }
+    return;
   }
-  get weapon() { return this.weapons[this.current]; }
-  select(i) {
-    if (i >= 0 && i < this.weapons.length && this.reloadT <= 0) { this.current = i; this.cooldown = 0.1; }
-  }
-  reload() {
-    const w = this.weapon;
-    if (w.mag < 0 || this.reloadT > 0 || w.inMag >= w.mag || w.reserve <= 0) return;
-    this.reloadT = 1.1;
-  }
-  update(dt) {
-    if (this.cooldown > 0) this.cooldown -= dt;
-    if (this.reloadT > 0) {
-      this.reloadT -= dt;
-      if (this.reloadT <= 0) {
-        const w = this.weapon;
-        const need = w.mag - w.inMag, take = Math.min(need, w.reserve);
-        w.inMag += take; w.reserve -= take;
-      }
-    }
-    if (this.tracer) {
-      this.tracer.material.opacity -= dt * 4;
-      if (this.tracer.material.opacity <= 0) { this.scene.remove(this.tracer); this.tracer = null; }
-    }
-    for (const f of this.foes) {
-      if (f.hp <= 0) continue;
-      f.shootT -= dt;
-      // foes walk toward the player and shoot
-      const dx = f.target.x - f.mesh.position.x, dz = f.target.z - f.mesh.position.z;
-      const d = Math.hypot(dx, dz);
-      if (d > 6) {
-        f.mesh.position.x += (dx / d) * 2.2 * dt;
-        f.mesh.position.z += (dz / d) * 2.2 * dt;
-        // The foe's gun is on local +Z, so yaw = atan2(dx,dz) faces the player.
-        f.mesh.rotation.y = Math.atan2(dx, dz);
-      }
-      if (f.shootT <= 0 && d < 40) {
-        f.shootT = range(Math.random, 1.2, 2.2);
-        return { foeShot: true, from: f.mesh.position.clone() };
-      }
-    }
-    return null;
-  }
-  // Fire from `origin` along `dir`. Returns what was hit, if anything.
-  fire(origin, dir, targets) {
-    const w = this.weapon;
-    if (this.cooldown > 0 || this.reloadT > 0) return null;
-    if (w.mag >= 0 && w.inMag <= 0) { this.reload(); return { empty: true }; }
-    this.cooldown = 1 / w.rate;
-    if (w.mag >= 0) w.inMag--;
-    const pellets = w.pellets || 1;
-    let hit = null;
-    for (let p = 0; p < pellets; p++) {
-      const d2 = dir.clone();
-      d2.x += (Math.random() - 0.5) * 0.03; d2.y += (Math.random() - 0.5) * 0.03; d2.z += (Math.random() - 0.5) * 0.03;
-      d2.normalize();
-      this.ray.set(origin, d2);
-      this.ray.far = w.range;
-      const hits = this.ray.intersectObjects(targets, false);
-      if (hits.length) {
-        const h = hits[0];
-        if (!hit || h.distance < hit.distance) hit = h;
-      }
-    }
-    // tracer line
-    const end = hit ? hit.point : origin.clone().add(dir.clone().multiplyScalar(w.range));
-    const geo = new THREE.BufferGeometry().setFromPoints([origin, end]);
-    if (this.tracer) this.scene.remove(this.tracer);
-    this.tracer = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9 }));
-    this.scene.add(this.tracer);
-    return hit ? { hit, weapon: w } : { miss: true };
-  }
-  damage(amount) {
-    // armour absorbs first
-    const toArmour = Math.min(this.armour, amount * 0.6);
-    this.armour -= toArmour;
-    this.health -= (amount - toArmour);
-    this.health = Math.max(0, this.health);
-    return this.health <= 0;
-  }
-  heal(amount) { this.health = Math.min(100, this.health + amount); }
-  addAmmo(id, n) {
-    const w = this.weapons.find(x => x.id === id);
-    if (w && w.mag >= 0) w.reserve += n;
-  }
-  // Spawn armed foes for the NIGHT MARKET job around (x,z).
-  spawnFoes(x, z, n, target) {
-    const rng = mulberry32(555);
-    for (let i = 0; i < n; i++) {
-      const g = new THREE.Group();
-      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.44, 1.2, 8), new THREE.MeshLambertMaterial({ color: 0x1c1f24 }));
-      body.position.y = 0.95; body.castShadow = true; g.add(body);
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 8, 6), new THREE.MeshLambertMaterial({ color: 0xc9a06a }));
-      head.position.y = 1.78; g.add(head);
-      const gun = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.12, 0.12), new THREE.MeshLambertMaterial({ color: 0x11151c }));
-      gun.position.set(0.3, 1.2, 0.4); g.add(gun);
-      const fx = x + range(rng, -12, 12), fz = z + range(rng, -12, 12);
-      g.position.set(fx, 0, fz);
-      this.scene.add(g);
-      this.foes.push({ mesh: g, hp: 60, shootT: range(rng, 0.5, 1.5), target });
+  p.ammo[p.weapon]--;
+  c.cooldown = p.weapon === 2 ? 0.09 : p.weapon === 3 ? 0.7 : 0.28;
+  const from = p.pos.clone(); from.y += 1.4;
+  const dir = new THREE.Vector3(Math.sin(p.heading), 0, Math.cos(p.heading));
+  const to = from.clone().addScaledVector(dir, w.range);
+  fireTracer(G, from, to);
+  G.audio.sfx('shot');
+  // hit the nearest guard roughly in front
+  const m = G.missions;
+  for (const g of m.guards) {
+    if (g.dead) continue;
+    const gx = g.x - p.pos.x, gz = g.z - p.pos.z;
+    const d = Math.hypot(gx, gz);
+    if (d > w.range) continue;
+    const ang = Math.atan2(gx, gz);
+    let dh = ang - p.heading;
+    while (dh > Math.PI) dh -= Math.PI * 2;
+    while (dh < -Math.PI) dh += Math.PI * 2;
+    if (Math.abs(dh) < 0.35) {
+      g.health -= w.damage;
+      if (g.health <= 0) { g.dead = true; if (g.mesh) g.mesh.visible = false; G.hud.floatText('GUARD DOWN'); }
     }
   }
-  clearFoes() {
-    for (const f of this.foes) this.scene.remove(f.mesh);
-    this.foes = [];
+  // shooting a cop raises wanted
+  if (G.police.wanted < 5 && Math.random() < 0.5) {
+    G.police.wanted = Math.min(5, G.police.wanted + 1);
+    G.player.wanted = G.police.wanted;
   }
-  foeHitMeshes() { return this.foes.filter(f => f.hp > 0).map(f => f.mesh); }
+}
+
+export function melee(G) {
+  const p = G.player;
+  const c = G.combat;
+  if (c.cooldown > 0) return;
+  c.cooldown = 0.5;
+  const m = G.missions;
+  for (const g of m.guards) {
+    if (g.dead) continue;
+    const d = Math.hypot(g.x - p.pos.x, g.z - p.pos.z);
+    if (d < 2.4) {
+      g.health -= 12;
+      if (g.health <= 0) { g.dead = true; if (g.mesh) g.mesh.visible = false; }
+    }
+  }
+  G.audio.sfx('punch');
+}
+
+export function renderGuards(G) {
+  const m = G.missions;
+  if (m.guards.length && !m.guards[0].mesh) {
+    const rng = new RNG(G.seed + 41);
+    for (const g of m.guards) {
+      const mesh = makePedMesh(rng);
+      mesh.position.set(g.x, 0, g.z);
+      mesh.scale.set(1.15, 1.15, 1.15);
+      G.scene.add(mesh);
+      g.mesh = mesh;
+    }
+  }
+  // guards shoot back when the player is near
+  for (const g of m.guards) {
+    if (g.dead || !g.mesh) continue;
+    const d = Math.hypot(g.x - G.player.pos.x, g.z - G.player.pos.z);
+    if (d < 26 && Math.random() < 0.01) {
+      damagePlayer(G, 4);
+      G.hud.floatText('HIT -4');
+    }
+  }
+}
+
+export function updateCombat(G, dt) {
+  const c = G.combat;
+  c.cooldown = Math.max(0, c.cooldown - dt);
+  if (c.muzzle > 0) {
+    c.muzzle -= dt;
+    if (c.muzzle <= 0) c.tracer.material.opacity = 0;
+  }
 }
